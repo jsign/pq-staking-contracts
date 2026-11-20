@@ -4,11 +4,11 @@ pragma solidity 0.8.38;
 import {Vm} from "forge-std/Vm.sol";
 import {LeanXmssHarness} from "./LeanXmss.t.sol";
 import {RegistrationTestBase} from "./helpers/RegistrationTestBase.sol";
-import {PQBuilderRegistration} from "../src/PQBuilderRegistration.sol";
 
 /// Tests what a proof of possession binds. A proof is a signature at leaf 0, by the XMSS key, of
 /// `M = keccak256(POP_DOMAIN ‖ chain_id ‖ bls_pubkey ‖ xmss_public_key)`. The proofs come from
-/// the generator in xmss/.
+/// the generator in xmss/. The tests run on this repository's contracts and on the geas ones of
+/// ethereum/sys-asm.
 abstract contract ProofOfPossessionTest is RegistrationTestBase {
     LeanXmssHarness internal harness;
 
@@ -150,7 +150,7 @@ contract ValidatorProofOfPossessionTest is ProofOfPossessionTest {
     /// BLS key sign the same message, so one proof registers the key for both.
     function test_OneProofForValidatorAndBuilder() public {
         Proof memory p = proof(0);
-        address builders = address(new PQBuilderRegistration());
+        address builders = deployRegistration(false);
         assertTrue(submit(registration, request(p)));
         assertTrue(submit(builders, bytes.concat(p.blsPubkey, p.xmssPubkey, p.signature)));
     }
@@ -159,5 +159,17 @@ contract ValidatorProofOfPossessionTest is ProofOfPossessionTest {
 contract BuilderProofOfPossessionTest is ProofOfPossessionTest {
     function isValidator() internal pure override returns (bool) {
         return false;
+    }
+}
+
+contract ValidatorSysAsmProofOfPossessionTest is ValidatorProofOfPossessionTest {
+    function isSysAsm() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract BuilderSysAsmProofOfPossessionTest is BuilderProofOfPossessionTest {
+    function isSysAsm() internal pure override returns (bool) {
+        return true;
     }
 }

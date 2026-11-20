@@ -4,22 +4,43 @@ pragma solidity 0.8.38;
 import {Vm} from "forge-std/Vm.sol";
 import {RegistrationTestBase} from "./helpers/RegistrationTestBase.sol";
 
-/// Compares the registration contract against the EIP's bytecode. Every call goes to both, with
-/// the signature only in this repository's request, and the two must agree on success, return
-/// data, logs, storage and balance.
+/// Compares the registration contract against another bytecode. Every call goes to both, and the
+/// two must agree on success, return data, logs, storage and balance. The other bytecode is:
+/// - The EIP's, which takes a request without the signature.
+/// - The geas contract of ethereum/sys-asm, which takes the same request as the registration
+///   contract and calls `PQProofOfPossession` to check the proof.
 abstract contract RegistrationQueueTest is RegistrationTestBase {
-    /// Where the EIP's bytecode is etched. The EIP hasn't chosen its address yet.
+    /// The other bytecode.
     address internal other;
 
     Proof[3] internal proofs;
 
     function setUp() public override {
         super.setUp();
-        other = address(0x8483);
-        vm.etch(other, eipRuntime());
+        if (againstSysAsm()) {
+            other = deploySysAsm(isValidator());
+        } else {
+            // The EIP hasn't chosen its address yet.
+            other = address(0x8483);
+            vm.etch(other, eipRuntime());
+        }
         for (uint256 i; i < 3; i++) {
             proofs[i] = proof(i);
         }
+    }
+
+    /// Whether the other bytecode is the geas contract of ethereum/sys-asm or the EIP's.
+    function againstSysAsm() internal pure virtual returns (bool) {
+        return false;
+    }
+
+    function otherName() internal pure returns (string memory) {
+        return againstSysAsm() ? "sys-asm bytecode" : "EIP bytecode";
+    }
+
+    /// The request for `p` as the other bytecode takes it.
+    function otherRequest(Proof memory p) internal pure returns (bytes memory) {
+        return againstSysAsm() ? request(p) : input(p);
     }
 
     // --- Calls to both contracts --------------------------------------------------------------
@@ -38,7 +59,7 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
     /// Adds proof `i` to both from `sender`, paying `value`.
     function addToBoth(address sender, uint256 i, uint256 value) internal returns (bool) {
         Proof memory p = proofs[i];
-        return sendToBoth(sender, request(p), input(p), value);
+        return sendToBoth(sender, request(p), otherRequest(p), value);
     }
 
     /// Sends `ours` to the registration contract and `theirs` to the other bytecode, from
@@ -326,7 +347,7 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
             assertTrue(ok);
             assertEq(out.length, maxPerBlock() * recordLength());
         }
-        emit log_named_uint("system call, full block, EIP bytecode", used[0]);
+        emit log_named_uint(string.concat("system call, full block, ", otherName()), used[0]);
         emit log_named_uint("system call, full block, this contract", used[1]);
         assertLt(used[1], SYSTEM_CALL_GAS_LIMIT);
     }
@@ -351,6 +372,44 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
         (, uint256 fee) = feeOfBoth();
         assertEq(fee, 1);
         assertTrue(addToBoth(sender(0), 0, fee));
+    }
+}
+
+/// The comparison with the geas contracts. They take the same request as the registration
+/// contract, so requests that carry no valid proof are compared too.
+abstract contract SysAsmQueueTest is RegistrationQueueTest {
+    function againstSysAsm() internal pure override returns (bool) {
+        return true;
+    }
+
+    /// Sends both a request with one bit changed, or of another length. They accept the same ones:
+    /// a change in the signature or in what it signs is rejected, and one in the VRF data isn't.
+    function testFuzz_AddChangedRequest(uint256 i, uint256 bit, bool flip, uint256 cut) public {
+        bytes memory data = request(proofs[i % 3]);
+        if (flip) {
+            bit = bound(bit, 0, 8 * data.length - 1);
+            data[bit / 8] ^= bytes1(uint8(1 << (bit % 8)));
+        }
+        if (cut % 8 == 0) {
+            cut = bound(cut, 0, data.length + 32);
+            if (cut > data.length) data = bytes.concat(data, new bytes(cut - data.length));
+            assembly {
+                mstore(data, cut)
+            }
+        }
+        sendToBoth(sender(0), data, data, 1);
+    }
+}
+
+contract ValidatorSysAsmQueueTest is SysAsmQueueTest {
+    function isValidator() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract BuilderSysAsmQueueTest is SysAsmQueueTest {
+    function isValidator() internal pure override returns (bool) {
+        return false;
     }
 }
 

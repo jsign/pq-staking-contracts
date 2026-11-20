@@ -4,10 +4,12 @@ pragma solidity 0.8.38;
 import {Test} from "forge-std/Test.sol";
 import {PQValidatorRegistration} from "../../src/PQValidatorRegistration.sol";
 import {PQBuilderRegistration} from "../../src/PQBuilderRegistration.sol";
+import {PQProofOfPossession} from "../../src/PQProofOfPossession.sol";
 
 /// Shared setup for the registration tests: one registration contract, the EIP's bytecode it
-/// implements, and the proofs of possession from the generator in xmss/. Each test runs once for
-/// the validator contract and once for the builder contract.
+/// implements, the geas contracts of ethereum/sys-asm, and the proofs of possession from the
+/// generator in xmss/. Each test runs once for the validator contract and once for the builder
+/// contract.
 abstract contract RegistrationTestBase is Test {
     struct Proof {
         bytes blsPubkey;
@@ -23,20 +25,44 @@ abstract contract RegistrationTestBase is Test {
     uint256 internal constant SYSTEM_CALL_GAS_LIMIT = 30_000_000;
     bytes32 internal constant POP_DOMAIN =
         keccak256("leanXMSS registration proof of possession v1");
+    /// The address the geas contracts call to check a proof of possession. It is a placeholder
+    /// until the verifier's address is chosen, and it is a constant in their bytecode.
+    address internal constant VERIFIER = 0x848300000000000000000000000000000000fFfF;
 
     /// The contract under test.
     address internal registration;
     string internal vectors;
 
     function setUp() public virtual {
-        registration = isValidator()
-            ? address(new PQValidatorRegistration())
-            : address(new PQBuilderRegistration());
+        registration = deployRegistration(isValidator());
         vectors = vm.readFile("test/vectors/leanxmss_pop.json");
         assertEq(block.chainid, vm.parseJsonUint(vectors, ".chainId"));
     }
 
     function isValidator() internal pure virtual returns (bool);
+
+    /// Whether the contract under test is the geas one from ethereum/sys-asm, which calls
+    /// `PQProofOfPossession` to check the proof, or this repository's Solidity one, which checks
+    /// it inline.
+    function isSysAsm() internal pure virtual returns (bool) {
+        return false;
+    }
+
+    function deployRegistration(bool validator) internal returns (address) {
+        if (isSysAsm()) return deploySysAsm(validator);
+        return
+            validator
+                ? address(new PQValidatorRegistration())
+                : address(new PQBuilderRegistration());
+    }
+
+    /// Puts the runtime bytecode of a geas contract at an address of its own, and the verifier it
+    /// calls at `VERIFIER`.
+    function deploySysAsm(bool validator) internal returns (address at) {
+        vm.etch(VERIFIER, address(new PQProofOfPossession()).code);
+        at = address(uint160(uint256(keccak256(abi.encode("sys-asm", validator)))));
+        vm.etch(at, sysAsmRuntime(validator));
+    }
 
     /// Calls the fee getter, which takes empty calldata and no value and returns a 32-byte word.
     function feeOf(address target) internal returns (uint256) {
@@ -85,6 +111,12 @@ abstract contract RegistrationTestBase is Test {
     function eipRuntime() internal view returns (bytes memory) {
         string memory file = isValidator() ? "validator.hex" : "builder.hex";
         return vm.parseBytes(vm.trim(vm.readFile(string.concat("test/vectors/eip8483/", file))));
+    }
+
+    /// The runtime bytecode of the geas contracts, copied by scripts/sync-sys-asm.sh.
+    function sysAsmRuntime(bool validator) internal view returns (bytes memory) {
+        string memory file = validator ? "validator.hex" : "builder.hex";
+        return vm.parseBytes(vm.trim(vm.readFile(string.concat("test/vectors/sys-asm/", file))));
     }
 
     // --- Proofs of possession -----------------------------------------------------------------
