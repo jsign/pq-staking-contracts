@@ -7,6 +7,7 @@ Foundry project for the PQ registration contracts. Run all commands from this di
 | `PQValidatorRegistration` | [EIP-8483](https://github.com/ethereum/EIPs/pull/12609)'s PQ registration request contract, with a leanXMSS proof of possession. |
 | `PQBuilderRegistration` | EIP-8483's builder PQ registration request contract, with a leanXMSS proof of possession. |
 | `LeanXmss` | The leanXMSS verifier, a library both contracts inline. It is [generated](#the-verifier). |
+| `PQProofOfPossession` | The proof of possession check as a contract of its own, for the [geas contracts](#the-geas-contracts) in ethereum/sys-asm. |
 
 `PQValidatorRegistration` and `PQBuilderRegistration` are EIP-8483's two request contracts,
 written in Solidity, with one addition: a request carries a leanXMSS proof of possession of the
@@ -77,6 +78,36 @@ logs, storage and balance, from any storage, including states no sequence of cal
 `test/ProofOfPossession.t.sol` checks what the proof binds, on proofs from the generator in
 [`xmss/`](../xmss/).
 
+## The geas contracts
+
+[ethereum/sys-asm](https://github.com/ethereum/sys-asm) has the two registration contracts in
+geas, in `src/pq_registrations` and `src/pq_builder_registrations`. They are the EIP's original
+geas with the signature added to the request. They don't verify it themselves: they call
+`PQProofOfPossession` with a STATICCALL, and revert unless the call succeeds and returns the
+32-byte word 1.
+
+`PQProofOfPossession` takes 2484 bytes of raw calldata,
+`bls_pubkey (48) ‖ xmss_pubkey (32) ‖ signature (2404)`. That is a builder request as it is, and
+a validator request without the second half of `pq_data`. It returns the word 1 for a proof of
+possession and reverts with no data for anything else. It does the check that `RegistrationQueue`
+does inline, with the same `LeanXmss` library.
+
+The verifier's address is a constant in the geas bytecode. It isn't chosen yet, so the geas
+contracts and the tests use the placeholder `0x848300000000000000000000000000000000ffff`.
+
+`scripts/sync-sys-asm.sh <path to sys-asm>` copies the runtime bytecode of the two geas contracts
+into `test/vectors/sys-asm/`, with the commit it read. The tests run on them too:
+
+- `test/RegistrationQueue.t.sol` compares each Solidity contract with the geas one, as it does
+  with the EIP's bytecode. Here both take the same request, so the test also sends them requests
+  with one bit changed or of another length.
+- `test/ProofOfPossession.t.sol` runs on the geas contracts as well.
+- `test/PQProofOfPossession.t.sol` tests the verifier contract on its own. Its calldata is a
+  builder request, so it must accept exactly what `PQBuilderRegistration` accepts.
+
+sys-asm has tests of its own for what the comparison can't see, such as a verifier that isn't
+deployed or that returns something other than 1.
+
 ## The verifier
 
 `src/LeanXmss.sol` is generated. `scripts/generate-verifier.py` writes it from
@@ -121,8 +152,9 @@ FOUNDRY_PROFILE=deep forge test --match-contract LeanXmssReferenceTest --fuzz-se
 
 `scripts/measure-gas.py` measures what the proof adds to a validator registration, on anvil, on
 Amsterdam as Foundry 1.9.0 implements it. It sends one add to the EIP's bytecode, and the same
-add with the signature to `PQValidatorRegistration` and to that contract with the check skipped
-(`test/helpers/Unchecked.sol`), in the three scenarios of the table below. It checks each
+add with the signature to `PQValidatorRegistration`, to that contract with the check skipped
+(`test/helpers/Unchecked.sol`) and to the geas contract with `PQProofOfPossession`, in the three
+scenarios of the table below. It checks each
 transaction's gasUsed against its intrinsic gas, calldata floor and traced execution, and prints
 every number. `test/VerifyGas.t.sol` snapshots `verify` alone in `snapshots/verify.json`.
 
@@ -149,6 +181,10 @@ The proof adds 59,776 gas in S1 and S2:
 
 In S3 the request pays its calldata floor, 182,024 gas, which is more than its intrinsic gas plus
 its execution, so the check adds nothing to what carrying the signature costs.
+
+The geas contract takes 2,857 gas more than `PQValidatorRegistration` in S1 and S2, 970,092 and
+284,652 gasUsed. That is what calling the verifier costs, less what the geas queue saves. In S3
+it also pays the calldata floor. Its system call is the EIP's, so a full block takes 11.3M gas.
 
 These are single measurements, not averages: every request carries the generator's first proof.
 The check is the execution gas of `PQValidatorRegistration` minus that of the same contract with

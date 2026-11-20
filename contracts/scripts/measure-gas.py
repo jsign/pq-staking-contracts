@@ -5,9 +5,11 @@ It first runs the forge snapshot test for verify alone. Then, on anvil, it sends
 without the proof in each scenario, and checks each transaction's gasUsed against its intrinsic gas, calldata floor and
 traced execution. Last, it splits a verify into its KECCAK256s.
 
-The adds go to three contracts: the EIP's bytecode, this repository's PQValidatorRegistration, and the same contract
-with the check skipped (test/helpers/Unchecked.sol). The last two take the same calldata, so the difference between
-them is what checking the proof costs.
+The adds go to four contracts: the EIP's bytecode, this repository's PQValidatorRegistration, the same contract with
+the check skipped (test/helpers/Unchecked.sol), and the geas contract of ethereum/sys-asm, which calls
+PQProofOfPossession to check the proof. The last three take the same calldata. The difference between the second and
+the third is what checking the proof costs, and the difference between the fourth and the second is what the port to
+geas with a separate verifier changes.
 
 Run it from anywhere, with forge and anvil on the PATH: `python3 contracts/scripts/measure-gas.py`.
 """
@@ -21,6 +23,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNTIME = open(os.path.join(ROOT, "test/vectors/eip8483/validator.hex")).read().strip()
+SYS_ASM_RUNTIME = open(os.path.join(ROOT, "test/vectors/sys-asm/validator.hex")).read().strip()
 VECTORS = json.load(open(os.path.join(ROOT, "test/vectors/leanxmss_pop.json")))
 PROOF = VECTORS["proofs"][0]
 # 32 bytes standing in for the VRF data, the second half of a validator's pq_data.
@@ -30,7 +33,10 @@ TARGETS = {
     "add": "0x0000000000000000000000000000000000008483",
     "unchecked": "0x000000000000000000000000000000000000C000",
     "proof": "0x000000000000000000000000000000000000C001",
+    "sys-asm": "0x000000000000000000000000000000000000C002",
 }
+# The address the geas contract calls to check the proof, a constant in its bytecode.
+VERIFIER = "0x848300000000000000000000000000000000ffff"
 PATHS = list(TARGETS)
 HARNESS = "0x000000000000000000000000000000000000B000"
 SCENARIOS = {
@@ -244,19 +250,23 @@ def main():
         "add": RUNTIME,
         "unchecked": artifact("Unchecked.sol", "UncheckedValidatorRegistration")["deployedBytecode"]["object"],
         "proof": artifact("PQValidatorRegistration.sol", "PQValidatorRegistration")["deployedBytecode"]["object"],
+        "sys-asm": SYS_ASM_RUNTIME,
     }
+    verifier = artifact("PQProofOfPossession.sol", "PQProofOfPossession")["deployedBytecode"]["object"]
     rows = {}
     node = Anvil()
     try:
         assert int(node.rpc("eth_chainId"), 16) == VECTORS["chainId"]
         base_no_value, base_value = base_gas(node)
+        node.rpc("anvil_setCode", VERIFIER, verifier)
         for path, target in TARGETS.items():
             node.rpc("anvil_setCode", target, code[path])
             data = add if path == "add" else request
             for scenario, r in scenarios(node, target, data).items():
                 # Every add pays a 1 wei fee, so it pays the base of a call with value.
                 rows[path, scenario] = breakdown(node, base_value, r, data)
-        breakdown(node, base_value, *check_tampered(node, TARGETS["proof"], request))
+        for path in ["proof", "sys-asm"]:
+            breakdown(node, base_value, *check_tampered(node, TARGETS[path], request))
         v = verify_breakdown(node, base_no_value)
     finally:
         node.close()
@@ -296,6 +306,10 @@ def main():
             ("unchecked - add in execution", exe["unchecked"] - exe["add"]),
             ("proof - unchecked", gas["proof"] - gas["unchecked"]),
             ("proof - unchecked in execution", exe["proof"] - exe["unchecked"]),
+            ("sys-asm contract, the proof checked", gas["sys-asm"]),
+            ("sys-asm - proof", gas["sys-asm"] - gas["proof"]),
+            ("sys-asm - proof in execution", exe["sys-asm"] - exe["proof"]),
+            ("sys-asm - add in execution", exe["sys-asm"] - exe["add"]),
         ]
         for label, value in lines:
             print(f"{label:40}{value:>12}")
