@@ -22,7 +22,10 @@ forge build --skip test --skip script --force --out "$build/out" --cache-path "$
 rm -rf "$dist"
 mkdir -p "$dist"
 
-combined='{}'
+# The contracts' JSON is accumulated in a file. Passed to jq as an argument, it is over the
+# kernel's limit of 128 KB per argument once it holds three contracts.
+combined="$build/combined.json"
+echo '{}' >"$combined"
 settings=''
 count=0
 
@@ -62,17 +65,17 @@ while IFS= read -r -d '' artifact; do
   printf '%s' "$runtime" >"$dist/$name.bin-runtime"
   jq '.abi' "$artifact" >"$dist/$name.abi.json"
 
-  combined=$(jq -n \
-    --argjson acc "$combined" \
+  jq \
     --arg name "$name" \
     --arg source "$source" \
     --slurpfile artifact "$artifact" \
-    '$acc + {($name): {
+    '. + {($name): {
         source: $source,
         bytecode: $artifact[0].bytecode.object,
         deployedBytecode: $artifact[0].deployedBytecode.object,
         abi: $artifact[0].abi
-      }}')
+      }}' "$combined" >"$combined.next"
+  mv "$combined.next" "$combined"
 
   if [[ -z "$settings" ]]; then
     settings=$(jq '{
@@ -92,8 +95,8 @@ if [[ "$count" -eq 0 ]]; then
   exit 1
 fi
 
-jq -n --argjson compiler "$settings" --argjson contracts "$combined" \
-  '{compiler: $compiler, contracts: $contracts}' >"$dist/bytecode.json"
+jq -n --argjson compiler "$settings" --slurpfile contracts "$combined" \
+  '{compiler: $compiler, contracts: $contracts[0]}' >"$dist/bytecode.json"
 
 (cd "$dist" && sha256sum -- * >SHA256SUMS)
 
