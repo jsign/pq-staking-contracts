@@ -9,13 +9,14 @@ import {RegistrationTestBase} from "./helpers/RegistrationTestBase.sol";
 /// data, logs, storage and balance.
 abstract contract RegistrationQueueTest is RegistrationTestBase {
     /// Where the EIP's bytecode is etched. The EIP hasn't chosen its address yet.
-    address internal constant EIP = address(0x8483);
+    address internal other;
 
     Proof[3] internal proofs;
 
     function setUp() public override {
         super.setUp();
-        vm.etch(EIP, eipRuntime());
+        other = address(0x8483);
+        vm.etch(other, eipRuntime());
         for (uint256 i; i < 3; i++) {
             proofs[i] = proof(i);
         }
@@ -25,51 +26,60 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
 
     /// Calls the fee getter on both. `fee` is zero when both revert.
     function feeOfBoth() internal returns (bool ok, uint256 fee) {
-        (bool okEip, bytes memory retEip) = EIP.call("");
+        (bool okOther, bytes memory retOther) = other.call("");
         (bool okOurs, bytes memory retOurs) = registration.call("");
-        assertEq(okOurs, okEip, "fee getter: success");
-        assertEq(retOurs, retEip, "fee getter: return data");
+        assertEq(okOurs, okOther, "fee getter: success");
+        assertEq(retOurs, retOther, "fee getter: return data");
         assertSameState();
-        if (okEip) fee = abi.decode(retEip, (uint256));
-        return (okEip, fee);
+        if (okOther) fee = abi.decode(retOther, (uint256));
+        return (okOther, fee);
     }
 
     /// Adds proof `i` to both from `sender`, paying `value`.
     function addToBoth(address sender, uint256 i, uint256 value) internal returns (bool) {
         Proof memory p = proofs[i];
-        uint256 tail = load(EIP, 3);
+        return sendToBoth(sender, request(p), input(p), value);
+    }
+
+    /// Sends `ours` to the registration contract and `theirs` to the other bytecode, from
+    /// `sender` and paying `value`.
+    function sendToBoth(address sender, bytes memory ours, bytes memory theirs, uint256 value)
+        internal
+        returns (bool)
+    {
+        uint256 tail = load(other, 3);
         vm.deal(sender, 2 * value);
         vm.recordLogs();
         vm.prank(sender);
-        (bool okEip, bytes memory retEip) = EIP.call{value: value}(input(p));
-        Vm.Log[] memory logsEip = vm.getRecordedLogs();
+        (bool okOther, bytes memory retOther) = other.call{value: value}(theirs);
+        Vm.Log[] memory logsOther = vm.getRecordedLogs();
         vm.prank(sender);
-        (bool okOurs, bytes memory retOurs) = registration.call{value: value}(request(p));
+        (bool okOurs, bytes memory retOurs) = registration.call{value: value}(ours);
         Vm.Log[] memory logsOurs = vm.getRecordedLogs();
 
-        assertEq(okOurs, okEip, "add: success");
-        assertEq(retOurs, retEip, "add: return data");
-        assertEq(logsOurs.length, logsEip.length, "add: logs");
-        for (uint256 j; j < logsEip.length; j++) {
-            assertEq(logsOurs[j].topics.length, logsEip[j].topics.length, "add: log topics");
-            assertEq(logsOurs[j].data, logsEip[j].data, "add: log data");
+        assertEq(okOurs, okOther, "add: success");
+        assertEq(retOurs, retOther, "add: return data");
+        assertEq(logsOurs.length, logsOther.length, "add: logs");
+        for (uint256 j; j < logsOther.length; j++) {
+            assertEq(logsOurs[j].topics.length, logsOther[j].topics.length, "add: log topics");
+            assertEq(logsOurs[j].data, logsOther[j].data, "add: log data");
         }
         assertSameState();
         assertSameRequests(tail, 1);
-        return okEip;
+        return okOther;
     }
 
     /// Runs the system call on both, with `data` as calldata.
     function systemCallBoth(bytes memory data) internal returns (bytes memory records) {
         vm.prank(SYSTEM_ADDRESS);
-        (bool okEip, bytes memory retEip) = EIP.call(data);
+        (bool okOther, bytes memory retOther) = other.call(data);
         vm.prank(SYSTEM_ADDRESS);
         (bool okOurs, bytes memory retOurs) = registration.call(data);
-        assertTrue(okEip, "system call failed");
-        assertEq(okOurs, okEip, "system call: success");
-        assertEq(retOurs, retEip, "system call: return data");
+        assertTrue(okOther, "system call failed");
+        assertEq(okOurs, okOther, "system call: success");
+        assertEq(retOurs, retOther, "system call: return data");
         assertSameState();
-        return retEip;
+        return retOther;
     }
 
     // --- State --------------------------------------------------------------------------------
@@ -79,7 +89,7 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
     }
 
     function store(uint256 slot, uint256 value) internal {
-        vm.store(EIP, bytes32(slot), bytes32(value));
+        vm.store(other, bytes32(slot), bytes32(value));
         vm.store(registration, bytes32(slot), bytes32(value));
     }
 
@@ -107,9 +117,9 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
 
     function assertSameState() internal view {
         for (uint256 slot; slot < QUEUE_OFFSET; slot++) {
-            assertEq(load(registration, slot), load(EIP, slot), "storage slot");
+            assertEq(load(registration, slot), load(other, slot), "storage slot");
         }
-        assertEq(registration.balance, EIP.balance, "balance");
+        assertEq(registration.balance, other.balance, "balance");
     }
 
     /// Checks that both store the same `n` requests from index `from`, and the same slot after
@@ -118,7 +128,7 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
         unchecked {
             uint256 first = QUEUE_OFFSET + from * slotsPerRequest();
             for (uint256 slot = first; slot != first + n * slotsPerRequest() + 1; slot++) {
-                assertEq(load(registration, slot), load(EIP, slot), "queue slot");
+                assertEq(load(registration, slot), load(other, slot), "queue slot");
             }
         }
     }
@@ -187,9 +197,9 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
     }
 
     function test_RevertWhen_FeeGetterCarriesValue() public {
-        (bool okEip,) = EIP.call{value: 1}("");
+        (bool okOther,) = other.call{value: 1}("");
         (bool okOurs,) = registration.call{value: 1}("");
-        assertFalse(okEip);
+        assertFalse(okOther);
         assertFalse(okOurs);
     }
 
@@ -236,7 +246,7 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
     ) public {
         // The system address would take the system call path, and the test funds the sender, so
         // sending from either contract would change its balance.
-        vm.assume(from != SYSTEM_ADDRESS && from != EIP && from != registration);
+        vm.assume(from != SYSTEM_ADDRESS && from != other && from != registration);
         vm.roll(bound(number, 0, type(uint64).max));
         setState(
             bound(excess, 0, 1000),
@@ -303,11 +313,11 @@ abstract contract RegistrationQueueTest is RegistrationTestBase {
     function test_FullBlockSystemCallFitsGasLimit() public {
         fillQueue(0, maxPerBlock(), "full block");
         store(3, maxPerBlock());
-        vm.cool(EIP);
+        vm.cool(other);
         vm.cool(registration);
 
         uint256[2] memory used;
-        address[2] memory contracts = [EIP, registration];
+        address[2] memory contracts = [other, registration];
         for (uint256 c; c < 2; c++) {
             vm.prank(SYSTEM_ADDRESS);
             uint256 before = gasleft();
